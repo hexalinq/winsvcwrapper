@@ -33,9 +33,9 @@ SERVICE_STATUS _tServiceStatus = {};
 SERVICE_STATUS_HANDLE _hServiceStatus = NULL;
 
 void __attribute__((noreturn)) abort() {
-	asm("int3");
-	ExitProcess(1);
-	*(void**)0;
+	asm("int3"); // Try to break into the debugger
+	ExitProcess(1); // Terminate process with 1 as the exit code
+	*(void**)0; // Dereference a NULL pointer to force a program crash in case ExitProcess(1) fails
 }
 
 wchar_t* wcsdup(const wchar_t* wString) {
@@ -46,6 +46,7 @@ wchar_t* wcsdup(const wchar_t* wString) {
 	return wNew;
 }
 
+// Strip the first argument (the executable name), so "winsvcwrap.exe program.exe arg1" becomes "program.exe arg1"
 wchar_t* ParseArgumentString(wchar_t* wArgs) {
 	int iLength = wcslen(wArgs);
 	if(wArgs[0] != '"') {
@@ -72,6 +73,7 @@ wchar_t* ParseArgumentString(wchar_t* wArgs) {
 	}
 }
 
+// Report status to the Windows service manager
 void ReportStatus(DWORD iState, DWORD iExitCode, DWORD iWaitHint) {
 	static DWORD iCheckpoint = 1;
 
@@ -103,6 +105,7 @@ void ReportStatus(DWORD iState, DWORD iExitCode, DWORD iWaitHint) {
 	SetServiceStatus(_hServiceStatus, &_tServiceStatus);
 }
 
+// This is called when a service control command is received (Stop, Pause, Resume, etc.)
 void ServiceControlHandler(DWORD iCommand) {
 	switch(iCommand) {
 		case SERVICE_CONTROL_STOP:
@@ -112,16 +115,21 @@ void ServiceControlHandler(DWORD iCommand) {
 }
 
 void ServiceMain(DWORD iArgs, wchar_t** aArgs) {
+	// Create a waitable event
 	_hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 	if(!_hStopEvent) abort();
 
+	// This process only hosts a single service, thus OWN_PROCESS
 	_tServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
 
+	// Handle control commands in the ServiceControlHandler function
 	_hServiceStatus = RegisterServiceCtrlHandler(L"", ServiceControlHandler);
 	if(!_hServiceStatus) abort();
 
 	ReportStatus(SERVICE_START_PENDING, NO_ERROR, 5000);
 
+	// Create a job object with the "KILL_ON_JOB_CLOSE" flag to ensure, that the
+	// child process is killed when the service stops
 	HANDLE hJob = CreateJobObjectW(NULL, NULL);
 	if(!hJob) abort();
 
@@ -144,6 +152,7 @@ void ServiceMain(DWORD iArgs, wchar_t** aArgs) {
 	CloseHandle(tProcessInfo.hThread);
 	free(wCommandLine);
 
+	// Wait for either a service stop command or the termination of the child process
 	ReportStatus(SERVICE_RUNNING, NO_ERROR, 0);
 	HANDLE aHandles[] = { _hStopEvent, tProcessInfo.hProcess };
 	DWORD iStatus = WaitForMultipleObjects(2, aHandles, FALSE, INFINITE);
@@ -161,7 +170,9 @@ void ServiceMain(DWORD iArgs, wchar_t** aArgs) {
 	ReportStatus(SERVICE_STOPPED, iExitCode, 0);
 }
 
+// Entry point
 void ProcessMain() {
+	// Call ServiceMain if started as a service; print an error message otherwise
 	if(!StartServiceCtrlDispatcherW((SERVICE_TABLE_ENTRYW[]){{L"", ServiceMain}, {NULL, NULL}})) {
 		if(GetLastError() != ERROR_FAILED_SERVICE_CONTROLLER_CONNECT) abort();
 		printf("This executable is meant to be started by the Windows service manager.\n");
